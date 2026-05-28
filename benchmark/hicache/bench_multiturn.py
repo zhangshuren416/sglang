@@ -366,6 +366,9 @@ class WorkloadGenerator:
             "latency": [],
             "prompt_len": [],
             "cached_tokens": [],
+            "cached_tokens_device": [],
+            "cached_tokens_host": [],
+            "cached_tokens_storage": [],
             "generated_len": [],
         }
         self.enable_round_barrier = args.enable_round_barrier
@@ -377,6 +380,9 @@ class WorkloadGenerator:
                     "latency": [],
                     "prompt_len": [],
                     "cached_tokens": [],
+                    "cached_tokens_device": [],
+                    "cached_tokens_host": [],
+                    "cached_tokens_storage": [],
                     "generated_len": [],
                 }
         self.num_clients = args.num_clients
@@ -462,6 +468,16 @@ class WorkloadGenerator:
                 self.performance_metrics["latency"].append(response.latency)
                 self.performance_metrics["prompt_len"].append(response.prompt_len)
                 self.performance_metrics["cached_tokens"].append(response.cached_tokens)
+                details = getattr(response, "cached_tokens_details", None) or {}
+                self.performance_metrics["cached_tokens_device"].append(
+                    details.get("device", 0)
+                )
+                self.performance_metrics["cached_tokens_host"].append(
+                    details.get("host", 0)
+                )
+                self.performance_metrics["cached_tokens_storage"].append(
+                    details.get("storage", 0)
+                )
                 self.performance_metrics["generated_len"].append(response.generated_len)
                 if self.enable_round_barrier:
                     self.performance_metrics[f"round_{current_round}"]["ttft"].append(
@@ -476,6 +492,15 @@ class WorkloadGenerator:
                     self.performance_metrics[f"round_{current_round}"][
                         "cached_tokens"
                     ].append(response.cached_tokens)
+                    self.performance_metrics[f"round_{current_round}"][
+                        "cached_tokens_device"
+                    ].append(details.get("device", 0))
+                    self.performance_metrics[f"round_{current_round}"][
+                        "cached_tokens_host"
+                    ].append(details.get("host", 0))
+                    self.performance_metrics[f"round_{current_round}"][
+                        "cached_tokens_storage"
+                    ].append(details.get("storage", 0))
                     self.performance_metrics[f"round_{current_round}"][
                         "generated_len"
                     ].append(response.generated_len)
@@ -582,12 +607,21 @@ class WorkloadGenerator:
         def max_or_zero(sorted_vals):
             return sorted_vals[-1] if sorted_vals else 0.0
 
+        total_prompt_tokens = sum(self.performance_metrics["prompt_len"])
+        total_cached_tokens = sum(self.performance_metrics["cached_tokens"])
+        total_cached_device = sum(self.performance_metrics["cached_tokens_device"])
+        total_cached_host = sum(self.performance_metrics["cached_tokens_host"])
+        total_cached_storage = sum(self.performance_metrics["cached_tokens_storage"])
+
+        def _safe_hit_rate(cached, total):
+            return cached / total if total > 0 else 0.0
+
         performance_data = {
             "summary": {
                 "total_requests": len(self.performance_metrics["ttft"]),
                 "request_rate": self.request_rate,
                 "average_prompt_len": (
-                    sum(self.performance_metrics["prompt_len"])
+                    total_prompt_tokens
                     / len(self.performance_metrics["prompt_len"])
                     if self.performance_metrics["prompt_len"]
                     else 0.0
@@ -624,19 +658,20 @@ class WorkloadGenerator:
                 "p99_latency": percentile(sorted_latency, 0.99),
                 "median_latency": percentile(sorted_latency, 0.5),
                 "max_latency": max_or_zero(sorted_latency),
-                "input_token_throughput": sum(self.performance_metrics["prompt_len"])
-                / duration,
+                "input_token_throughput": total_prompt_tokens / duration,
                 "output_token_throughput": sum(
                     self.performance_metrics["generated_len"]
                 )
                 / duration,
                 "throughput": self.pbar.total / duration,
-                "cache_hit_rate": (
-                    0
-                    if sum(self.performance_metrics["prompt_len"]) == 0
-                    else sum(self.performance_metrics["cached_tokens"])
-                    / sum(self.performance_metrics["prompt_len"])
-                ),
+                "cache_hit_rate": _safe_hit_rate(total_cached_tokens, total_prompt_tokens),
+                "total_cached_tokens": total_cached_tokens,
+                "total_cached_tokens_device": total_cached_device,
+                "total_cached_tokens_host": total_cached_host,
+                "total_cached_tokens_storage": total_cached_storage,
+                "cache_hit_rate_device": _safe_hit_rate(total_cached_device, total_prompt_tokens),
+                "cache_hit_rate_host": _safe_hit_rate(total_cached_host, total_prompt_tokens),
+                "cache_hit_rate_storage": _safe_hit_rate(total_cached_storage, total_prompt_tokens),
             },
         }
         if self.enable_round_barrier:
@@ -644,18 +679,25 @@ class WorkloadGenerator:
             for round_num in range(self.num_rounds):
                 round_key = f"round_{round_num}"
                 round_metrics = self.performance_metrics[round_key]
+                round_prompt = sum(round_metrics["prompt_len"])
+                round_cached = sum(round_metrics["cached_tokens"])
+                round_cached_device = sum(round_metrics["cached_tokens_device"])
+                round_cached_host = sum(round_metrics["cached_tokens_host"])
+                round_cached_storage = sum(round_metrics["cached_tokens_storage"])
                 performance_data["round"][round_key] = {
                     "average_ttft": (
                         sum(round_metrics["ttft"]) / len(round_metrics["ttft"])
                         if round_metrics["ttft"]
                         else 0
                     ),
-                    "cache_hit_rate": (
-                        0
-                        if sum(round_metrics["prompt_len"]) == 0
-                        else sum(round_metrics["cached_tokens"])
-                        / sum(round_metrics["prompt_len"])
-                    ),
+                    "cache_hit_rate": _safe_hit_rate(round_cached, round_prompt),
+                    "total_cached_tokens": round_cached,
+                    "total_cached_tokens_device": round_cached_device,
+                    "total_cached_tokens_host": round_cached_host,
+                    "total_cached_tokens_storage": round_cached_storage,
+                    "cache_hit_rate_device": _safe_hit_rate(round_cached_device, round_prompt),
+                    "cache_hit_rate_host": _safe_hit_rate(round_cached_host, round_prompt),
+                    "cache_hit_rate_storage": _safe_hit_rate(round_cached_storage, round_prompt),
                     "request_count": len(round_metrics["ttft"]),
                 }
         print("All requests completed")
@@ -708,6 +750,18 @@ class WorkloadGenerator:
             f"  Request Throughput: {performance_data['summary']['throughput']:.2f} requests per second"
         )
         print(f"  Cache Hit Rate: {performance_data['summary']['cache_hit_rate']:.6f}")
+        print(
+            f"  Cache Hit Rate (L1/Device): {performance_data['summary']['cache_hit_rate_device']:.6f} "
+            f"({performance_data['summary']['total_cached_tokens_device']} tokens)"
+        )
+        print(
+            f"  Cache Hit Rate (L2/Host):   {performance_data['summary']['cache_hit_rate_host']:.6f} "
+            f"({performance_data['summary']['total_cached_tokens_host']} tokens)"
+        )
+        print(
+            f"  Cache Hit Rate (L3/Storage): {performance_data['summary']['cache_hit_rate_storage']:.6f} "
+            f"({performance_data['summary']['total_cached_tokens_storage']} tokens)"
+        )
 
         if self.enable_round_barrier:
             # Print round-basedsummary
@@ -719,11 +773,15 @@ class WorkloadGenerator:
                         round_data = performance_data["round"][round_key]
                         avg_ttft = round_data["average_ttft"]
                         cache_hit_rate = round_data["cache_hit_rate"]
+                        hit_rate_device = round_data["cache_hit_rate_device"]
+                        hit_rate_host = round_data["cache_hit_rate_host"]
+                        hit_rate_storage = round_data["cache_hit_rate_storage"]
                         request_count = round_data["request_count"]
                         clients_in_round = self.clients_per_round[round_num]
                         print(
                             f"  Round {round_num}: Average TTFT = {avg_ttft:.2f}s, "
                             f"Cache Hit Rate = {cache_hit_rate:.6f} "
+                            f"(L1={hit_rate_device:.6f}, L2={hit_rate_host:.6f}, L3={hit_rate_storage:.6f}) "
                             f"({request_count} requests, "
                             f"{clients_in_round} clients)"
                         )

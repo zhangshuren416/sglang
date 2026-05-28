@@ -35,6 +35,7 @@ async def async_request_sglang_generate(
                 if response.status == 200:
                     prompt_tokens = 0
                     cached_tokens = 0
+                    cached_tokens_details = None
 
                     async for chunk_bytes in response.content:
                         chunk_bytes = chunk_bytes.strip()
@@ -58,11 +59,15 @@ async def async_request_sglang_generate(
                                 if ttft == 0.0:
                                     ttft = time.perf_counter() - st
                                     output.ttft = ttft
-                                    prompt_tokens = (data.get("meta_info") or {}).get(
+                                    meta_info = data.get("meta_info") or {}
+                                    prompt_tokens = meta_info.get(
                                         "prompt_tokens", 0
                                     )
-                                    cached_tokens = (data.get("meta_info") or {}).get(
+                                    cached_tokens = meta_info.get(
                                         "cached_tokens", 0
+                                    )
+                                    cached_tokens_details = meta_info.get(
+                                        "cached_tokens_details", None
                                     )
                                 else:
                                     output.itl.append(timestamp - most_recent_timestamp)
@@ -75,6 +80,7 @@ async def async_request_sglang_generate(
                     output.latency = latency
                     output.prompt_len = prompt_tokens
                     output.cached_tokens = cached_tokens
+                    output.cached_tokens_details = cached_tokens_details
                     output.generated_len = len(output.itl) + 1
                 else:
                     output.error = response.reason or ""
@@ -112,6 +118,7 @@ async def async_request_openai_chat_completions(
                 if response.status == 200:
                     prompt_tokens = 0
                     cached_tokens = 0
+                    cached_tokens_details = None
                     completion_tokens = 0
 
                     async for chunk_bytes in response.content:
@@ -145,6 +152,13 @@ async def async_request_openai_chat_completions(
 
                                     most_recent_timestamp = timestamp
 
+                            # sglext chunk with cached_tokens_details
+                            sglext = data.get("sglext")
+                            if sglext and sglext.get("cached_tokens_details"):
+                                cached_tokens_details = sglext[
+                                    "cached_tokens_details"
+                                ]
+
                             # Final chunk with usage stats
                             usage = data.get("usage")
                             if usage:
@@ -159,6 +173,7 @@ async def async_request_openai_chat_completions(
                     output.latency = latency
                     output.prompt_len = prompt_tokens
                     output.cached_tokens = cached_tokens
+                    output.cached_tokens_details = cached_tokens_details
                     output.generated_len = (
                         completion_tokens if completion_tokens else len(output.itl) + 1
                     )
@@ -183,6 +198,7 @@ def gen_payload_openai(messages, output_len, model):
         "temperature": 0.0,
         "stream": True,
         "stream_options": {"include_usage": True},
+        "return_cached_tokens_details": True,
     }
 
 
