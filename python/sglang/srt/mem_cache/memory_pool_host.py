@@ -348,7 +348,16 @@ class HostKVCache(abc.ABC):
 
     @synchronized
     def free(self, indices: torch.Tensor) -> int:
+        av_before = len(self.free_slots)
         self.free_slots = torch.cat([self.free_slots, indices.cpu()])
+        av_after = len(self.free_slots)
+        logger.debug(
+            "[HiCachePrefetchHostMem] mem_pool_host.free pool=HostKVCache num_indices=%s size=%s available_before=%s available_after=%s",
+            len(indices),
+            self.size,
+            av_before,
+            av_after,
+        )
         return len(indices)
 
 
@@ -1214,8 +1223,46 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
         """
         assert len(indices) % self.page_size == 0
         ptr_list = []
-        kv_buffer_data_ptr = self.kv_buffer.data_ptr()
         indices = indices.tolist()
+        if self.layout == "page_first_kv_split":
+            k_buffer_data_ptr = self.k_buffer.data_ptr()
+            v_buffer_data_ptr = self.v_buffer.data_ptr()
+            for index in range(0, len(indices), self.page_size):
+                k_ptr = (
+                    k_buffer_data_ptr
+                    + indices[index]
+                    * self.layer_num
+                    * self.kv_lora_rank
+                    * self.dtype.itemsize
+                )
+                v_ptr = (
+                    v_buffer_data_ptr
+                    + indices[index]
+                    * self.layer_num
+                    * self.qk_rope_head_dim
+                    * self.dtype.itemsize
+                )
+                ptr_list.append(k_ptr)
+                ptr_list.append(v_ptr)
+            k_element_size = (
+                self.layer_num
+                * self.dtype.itemsize
+                * self.page_size
+                * self.kv_lora_rank
+            )
+            v_element_size = (
+                self.layer_num
+                * self.dtype.itemsize
+                * self.page_size
+                * self.qk_rope_head_dim
+            )
+            element_size_list = []
+            for _ in range(0, len(indices), self.page_size):
+                element_size_list.append(k_element_size)
+                element_size_list.append(v_element_size)
+            return ptr_list, element_size_list
+
+        kv_buffer_data_ptr = self.kv_buffer.data_ptr()
         if self.layout == "layer_first":
             for index in range(0, len(indices), self.page_size):
                 for layer_id in range(self.layer_num):
@@ -1416,7 +1463,16 @@ class MambaPoolHost(HostKVCache):
 
     @synchronized
     def free(self, indices: torch.Tensor) -> int:
+        av_before = len(self.free_slots)
         self.free_slots = torch.cat([self.free_slots, indices])
+        av_after = len(self.free_slots)
+        logger.debug(
+            "[HiCachePrefetchHostMem] mem_pool_host.free pool=MambaPoolHost num_indices=%s size=%s available_before=%s available_after=%s",
+            len(indices),
+            self.size,
+            av_before,
+            av_after,
+        )
         return len(indices)
 
     def get_size_per_token(self):

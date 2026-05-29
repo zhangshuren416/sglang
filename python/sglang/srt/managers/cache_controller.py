@@ -13,6 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import contextlib
+import contextvars
 import logging
 import threading
 import time
@@ -21,6 +23,7 @@ from typing import TYPE_CHECKING, List, NamedTuple, Optional
 
 import torch
 
+from sglang.srt.environ import envs
 from sglang.srt.mem_cache.hicache_storage import (
     HiCacheStorageConfig,
     HiCacheStorageExtraInfo,
@@ -46,6 +49,33 @@ from sglang.srt.utils import get_device_module
 logger = logging.getLogger(__name__)
 
 device_module = get_device_module()
+
+
+def hicache_debug_enabled() -> bool:
+    return envs.SGLANG_HICACHE_DEBUG_LOGGING.get() and logger.isEnabledFor(
+        logging.DEBUG
+    )
+
+
+def log_hicache_debug(msg: str, *args, **kwargs) -> None:
+    if hicache_debug_enabled():
+        logger.debug(msg, *args, **kwargs)
+
+
+# Snapshot of HiRadixCache.evictable_host_leaves cardinality when calling EvictKVPath
+# (`cache_controller.evict_host`). Other callers leave this unset (default None).
+_radix_evictable_host_leaves: contextvars.ContextVar[Optional[int]] = (
+    contextvars.ContextVar("_radix_evictable_host_leaves", default=None)
+)
+
+
+@contextlib.contextmanager
+def radix_evict_host_leaf_context(evictable_host_leaves: int):
+    token = _radix_evictable_host_leaves.set(evictable_host_leaves)
+    try:
+        yield
+    finally:
+        _radix_evictable_host_leaves.reset(token)
 
 
 class LayerLoadingEvent:
@@ -522,7 +552,7 @@ class HiCacheController:
 
             if (
                 self.storage_backend_type
-                in ["hf3fs", "mooncake", "eic", "nixl", "simm"]
+                in ["hf3fs", "mooncake", "ascend_memcache", "eic", "nixl", "simm"]
             ) or (
                 self.storage_backend_type == "dynamic"
                 and bool(self.storage_config.extra_config.get("interface_v1", 0))
@@ -831,8 +861,32 @@ class HiCacheController:
         if not backup_only:
             raise ValueError("Other eviction policies are not supported yet.")
 
+        n = len(host_indices)
+        mp = self.mem_pool_host
+        avail_before = mp.available_size()
+        radix_leaves_hint = _radix_evictable_host_leaves.get()
+        if radix_leaves_hint is not None:
+            log_hicache_debug(
+                "[HiCacheHostEvict] controller_evict_host radix_evictable_host_leaves=%s num_indices=%s pool_size=%s available_size=%s",
+                radix_leaves_hint,
+                n,
+                mp.size,
+                avail_before,
+            )
+        log_hicache_debug(
+            "[HiCachePrefetchHostMem] evict_host_before_free num_indices=%s pool_size=%s available_size=%s",
+            n,
+            mp.size,
+            avail_before,
+        )
         self.mem_pool_host.free(host_indices)
-        return len(host_indices)
+        log_hicache_debug(
+            "[HiCachePrefetchHostMem] evict_host_after_free num_indices=%s pool_size=%s available_size=%s",
+            n,
+            mp.size,
+            mp.available_size(),
+        )
+        return n
 
     def set_draft_kv_pool(self, draft_device_pool, draft_host_pool) -> None:
         """Register draft KV pools so L2/L3 ops piggyback draft transfers."""
@@ -858,6 +912,14 @@ class HiCacheController:
         """
         operation = PrefetchOperation(
             request_id, host_indices, new_input_tokens, last_hash, prefix_keys
+        )
+        mp = self.mem_pool_host
+        log_hicache_debug(
+            "[HiCachePrefetchHostMem] prefetch_enqueued req_id=%s host_indices=%s pool_size=%s available_size=%s",
+            request_id,
+            host_indices.numel(),
+            mp.size,
+            mp.available_size(),
         )
         self.prefetch_queue.put(operation)
         return operation
@@ -920,6 +982,10 @@ class HiCacheController:
             batch_host_indices = operation.host_indices[
                 i * self.page_size : (i + len(batch_hashes)) * self.page_size
             ]
+            token_start = i * self.page_size
+            token_end = min(
+                (i + len(batch_hashes)) * self.page_size, len(operation.token_ids)
+            )
 
             # Best-effort draft L3 read before publishing target completion.
             # Otherwise wait_complete can race and load back target KV before
@@ -929,7 +995,16 @@ class HiCacheController:
 
             prev_completed_tokens = operation.completed_tokens
             # Get one batch token, and update the completed_tokens if succeed
-            extra_info = HiCacheStorageExtraInfo(prefix_keys=prefix_keys)
+            extra_info = HiCacheStorageExtraInfo(
+                prefix_keys=prefix_keys,
+                extra_info={
+                    "request_id": getattr(operation, "request_id", None),
+                    "token_ids": operation.token_ids[token_start:token_end],
+                    "radix_kv_indices": batch_host_indices,
+                    "batch_page_start": i,
+                    "batch_page_count": len(batch_hashes),
+                },
+            )
             self.page_get_func(operation, batch_hashes, batch_host_indices, extra_info)
             # Check termination
             if (
@@ -990,7 +1065,15 @@ class HiCacheController:
                     batch_tokens[i : i + self.page_size], last_hash
                 )
                 batch_hashes.append(last_hash)
-            extra_info = HiCacheStorageExtraInfo(prefix_keys=prefix_keys)
+            extra_info = HiCacheStorageExtraInfo(
+                prefix_keys=prefix_keys,
+                extra_info={
+                    "request_id": getattr(operation, "request_id", None),
+                    "token_ids": batch_tokens,
+                    "batch_page_start": start // self.page_size,
+                    "batch_page_count": len(batch_hashes),
+                },
+            )
             hit_page_num = self.storage_backend.batch_exists(batch_hashes, extra_info)
             hash_value.extend(batch_hashes[:hit_page_num])
             storage_query_count += hit_page_num * self.page_size
@@ -1015,6 +1098,13 @@ class HiCacheController:
                 operation = self.prefetch_queue.get(block=True, timeout=1)
                 if operation is None:
                     continue
+                log_hicache_debug(
+                    "[HiCachePrefetchHostMem] prefetch_thread_op_begin req_id=%s pool_size=%s available_size=%s prefetch_tokens_occupied=%s",
+                    operation.request_id,
+                    self.mem_pool_host.size,
+                    self.mem_pool_host.available_size(),
+                    self.prefetch_tokens_occupied,
+                )
                 hash_value, storage_hit_count = self._storage_hit_query(operation)
                 storage_hit_count_tensor = torch.tensor(
                     storage_hit_count, dtype=torch.int
@@ -1031,6 +1121,13 @@ class HiCacheController:
                     logger.debug(
                         f"Revoking prefetch for request {operation.request_id} due to insufficient hits ({storage_hit_count})."
                     )
+                    log_hicache_debug(
+                        "[HiCacheL3Debug] prefetch_revoke req_id=%s storage_hit_tokens=%s prefetch_threshold=%s requested_tokens=%s",
+                        operation.request_id,
+                        storage_hit_count,
+                        self.prefetch_threshold,
+                        len(operation.token_ids),
+                    )
                 else:
                     operation.hash_value = hash_value[
                         : (storage_hit_count // self.page_size)
@@ -1042,6 +1139,13 @@ class HiCacheController:
                     operation.host_indices = operation.host_indices[:storage_hit_count]
                     logger.debug(
                         f"Prefetching {len(operation.hash_value)} pages for request {operation.request_id}."
+                    )
+                    log_hicache_debug(
+                        "[HiCacheL3Debug] prefetch_scheduled req_id=%s scheduled_pages=%s scheduled_tokens=%s requested_tokens=%s",
+                        operation.request_id,
+                        len(operation.hash_value),
+                        storage_hit_count,
+                        len(operation.token_ids),
                     )
                     self.prefetch_buffer.put(operation)
 
@@ -1125,9 +1229,22 @@ class HiCacheController:
             batch_host_indices = operation.host_indices[
                 i * self.page_size : (i + len(batch_hashes)) * self.page_size
             ]
+            token_start = i * self.page_size
+            token_end = min(
+                (i + len(batch_hashes)) * self.page_size, len(operation.token_ids)
+            )
             # Set one batch token, and record if success.
             # todo: allow partial success
-            extra_info = HiCacheStorageExtraInfo(prefix_keys=prefix_keys)
+            extra_info = HiCacheStorageExtraInfo(
+                prefix_keys=prefix_keys,
+                extra_info={
+                    "request_id": getattr(operation, "request_id", None),
+                    "token_ids": operation.token_ids[token_start:token_end],
+                    "radix_kv_indices": batch_host_indices,
+                    "batch_page_start": i,
+                    "batch_page_count": len(batch_hashes),
+                },
+            )
             success = self.page_set_func(batch_hashes, batch_host_indices, extra_info)
             if not success:
                 logger.warning(
