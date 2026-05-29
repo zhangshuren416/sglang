@@ -901,17 +901,17 @@ class HiRadixCache(RadixCache):
             return
         rs = reason if reason is not None else "-"
         mut = mutation if mutation is not None else "-"
-        logger.debug(
-            "[HiCacheHostLeafDebug] caller=%s phase=%s {%s} %s reason=%s mutation=%s "
-            "evictable_host_leaves_size=%s",
-            caller,
-            phase,
-            self._host_leaf_node_snapshot(node),
-            self._host_leaf_children_trace(node),
-            rs,
-            mut,
-            len(self.evictable_host_leaves),
-        )
+        # logger.debug(
+        #     "[HiCacheHostLeafDebug] caller=%s phase=%s {%s} %s reason=%s mutation=%s "
+        #     "evictable_host_leaves_size=%s",
+        #     caller,
+        #     phase,
+        #     self._host_leaf_node_snapshot(node),
+        #     self._host_leaf_children_trace(node),
+        #     rs,
+        #     mut,
+        #     len(self.evictable_host_leaves),
+        # )
 
     def _log_prefetch_from_storage_abort_root_diag(
         self,
