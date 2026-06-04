@@ -391,6 +391,22 @@ class Envs:
     MOONCAKE_ENABLE_SSD_OFFLOAD = EnvBool(False)
     MOONCAKE_OFFLOAD_FILE_STORAGE_PATH = EnvStr(None)
 
+    # Ascend MemCache (HiCache L3); see https://gitcode.com/Ascend/memcache
+    SGLANG_HICACHE_MEMCACHE_CONFIG_PATH = EnvStr(None)
+    # Verbose HiCache host-leaf / prefetch / evict diagnostics (requires log level DEBUG).
+    SGLANG_HICACHE_DEBUG_LOGGING = EnvBool(False)
+    # Trace / debug
+    SGLANG_ASCEND_MEMCACHE_TRACE_LOGGING = EnvBool(True)
+    SGLANG_ASCEND_MEMCACHE_TRACE_MAX_KEYS = EnvInt(0)
+    SGLANG_ASCEND_MEMCACHE_PRINT_SAMPLE_KEYS = EnvBool(False)
+    SGLANG_ASCEND_MEMCACHE_TRACE_BATCH_EXISTS_KEYS = EnvBool(False)
+    SGLANG_ASCEND_MEMCACHE_TRACE_BATCH_EXISTS_MAX_HIT = EnvBool(True)
+    SGLANG_ASCEND_MEMCACHE_TRACE_BATCH_PUT_KEYS = EnvBool(False)
+    SGLANG_ASCEND_MEMCACHE_TRACE_BATCH_PUT_POST_EXIST = EnvBool(False)
+    SGLANG_ASCEND_MEMCACHE_TRACE_BATCH_PUT_RESULT_BOOLS = EnvBool(False)
+    SGLANG_ASCEND_MEMCACHE_TRACE_LOG_PATH = EnvStr(None)
+    SGLANG_ASCEND_MEMCACHE_ENABLE_WARMUP = EnvBool(False)
+
     # AMD & ROCm
     SGLANG_USE_AITER = EnvBool(False)
     SGLANG_USE_AITER_AG = EnvBool(True)

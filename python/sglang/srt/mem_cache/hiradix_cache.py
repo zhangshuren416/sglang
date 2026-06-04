@@ -13,7 +13,10 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 import torch
 
 from sglang.srt.disaggregation.kv_events import StorageMedium
-from sglang.srt.managers.cache_controller import HiCacheController, PrefetchOperation
+from sglang.srt.managers.cache_controller import (
+    HiCacheController,
+    PrefetchOperation,
+)
 from sglang.srt.mem_cache.base_prefix_cache import (
     DecLockRefParams,
     DecLockRefResult,
