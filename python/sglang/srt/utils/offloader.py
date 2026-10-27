@@ -42,6 +42,9 @@ class BaseOffloader(ABC):
     def post_init(self):
         pass
 
+    def postprocess_module(self, module, quant_method, target_device):
+        return False
+
     @property
     def forbid_copy_engine_usage(self):
         return False
@@ -67,6 +70,10 @@ def set_offloader(instance: BaseOffloader):
 
 def create_offloader():
     if get_exec().moe.moe_a2a_backend == "ascend_dfc":
+        if get_exec().offload.moe_weight_offload_backend == "memfabric":
+            from sglang.srt.hardware_backend.npu.moe.dfc_offload import DfcOffloader
+
+            return DfcOffloader()
         from sglang.srt.hardware_backend.npu.moe.dfc_model_adapter import (
             DfcModelAdapter,
         )

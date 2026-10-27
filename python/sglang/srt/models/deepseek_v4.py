@@ -3757,6 +3757,28 @@ class DeepseekV4DecoderLayer(nn.Module):
         input_ids: Optional[torch.Tensor],
         input_ids_global: Optional[torch.Tensor],
     ) -> torch.Tensor:
+        offloader = getattr(self, "_dfc_weight_offloader", None)
+        context = (
+            offloader.moe_scope(self.layer_id)
+            if offloader is not None
+            else nullcontext()
+        )
+        with context:
+            return self._run_moe_ffn_dp_sync_impl(
+                hidden_states,
+                forward_batch,
+                input_ids=input_ids,
+                input_ids_global=input_ids_global,
+            )
+
+    def _run_moe_ffn_dp_sync_impl(
+        self,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        *,
+        input_ids: Optional[torch.Tensor],
+        input_ids_global: Optional[torch.Tensor],
+    ) -> torch.Tensor:
         _use_cp = self.dsa_enable_prefill_cp and dsa_use_prefill_cp(forward_batch)
         _use_tp_moe_gather = (
             not _use_cp
@@ -4432,6 +4454,9 @@ class DeepseekV4Model(nn.Module):
         combined_attn = None
         normalized_attn = None
         for i in range(self.start_layer, self.end_layer):
+            offloader = getattr(self.layers[i], "_dfc_weight_offloader", None)
+            if offloader is not None:
+                offloader.on_layer_enter(self.layers[i].layer_id)
             if tail is not None and i == self.late_layer_start:
                 combined_attn = None
                 normalized_attn = None
@@ -4770,6 +4795,9 @@ class DeepseekV4Model(nn.Module):
             prev_residual, prev_post, prev_comb = None, None, None
             last_layer = None
             for i in range(self.start_layer, self.end_layer):
+                offloader = getattr(self.layers[i], "_dfc_weight_offloader", None)
+                if offloader is not None:
+                    offloader.on_layer_enter(self.layers[i].layer_id)
                 layer = self.layers[i]
                 last_layer = layer
                 ctx = (

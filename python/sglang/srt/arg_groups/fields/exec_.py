@@ -930,6 +930,17 @@ class ExecOffload(msgspec.Struct):
         "Steps to prefetch in offloading.",
     ] = 1
     offload_mode: A[str, "Mode of offloading."] = "cpu"
+    moe_weight_offload_backend: A[
+        Literal["none", "memfabric"],
+        Arg(
+            help="Expert weight storage for eager A3 DFC prefill.",
+            choices=["none", "memfabric"],
+        ),
+    ] = "none"
+    moe_weight_offload_config: A[
+        Optional[str],
+        "JSON file configuring the MemFabric SHARED weight pool for A3 DFC.",
+    ] = None
     ple_offload_embedding: A[
         Optional[bool],
         Arg(

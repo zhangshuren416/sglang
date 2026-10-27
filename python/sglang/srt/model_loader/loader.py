@@ -1071,7 +1071,11 @@ class DefaultModelLoader(BaseModelLoader):
 
     @staticmethod
     def postprocess_weights(model, target_device):
+        from sglang.srt.utils.offloader import get_offloader
+
         for module, quant_method in _modules_with_quant_method(model):
+            if get_offloader().postprocess_module(module, quant_method, target_device):
+                continue
             # When quant methods need to process weights after loading
             # (for repacking, quantizing, etc), they expect parameters
             # to be on the global target device. This scope is for the

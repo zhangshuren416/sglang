@@ -518,5 +518,7 @@ POSITIONAL_FIELD_ORDER = (
     "enable_response_store",
     "disaggregation_decode_host_receive_threshold",
     "dfc_max_output_tokens",
+    "moe_weight_offload_backend",
+    "moe_weight_offload_config",
 )
 # fmt: on
