@@ -117,6 +117,29 @@ class _Plan:
         self.device.copy.enqueue(copy)
 
 
+class _Moe(torch.nn.Module):
+    def __init__(self, layer_id):
+        super().__init__()
+        self.layer_id = layer_id
+
+    def forward(self, enqueue):
+        enqueue()
+        return object()
+
+
+class _Decoder(torch.nn.Module):
+    def __init__(self, layer_id):
+        super().__init__()
+        self.layer_id = layer_id
+        self.mlp = _Moe(layer_id)
+        self.fail_attention = False
+
+    def forward(self, enqueue):
+        if self.fail_attention:
+            raise RuntimeError("attention failed")
+        return self.mlp(enqueue)
+
+
 class TestDfcWeightOffload(CustomTestCase):
     def test_pool_capacity_and_native_configuration(self):
         """Native reserve uses whole GiB, not logical payload bytes or JSON booleans."""
@@ -163,10 +186,10 @@ class TestDfcWeightOffload(CustomTestCase):
                 offloader.device = "fake"
                 offloader.stream = device.copy
                 offloader.ready_for_forward = True
-                offloader.layers = [
-                    SimpleNamespace(layer_id=i, mlp=SimpleNamespace(alt_stream=None))
-                    for i in range(count)
-                ]
+                # Absolute decoder IDs differ from sparse-layer/slot indices.
+                offloader.layers = [_Decoder(3 + 2 * i) for i in range(count)]
+                for layer in offloader.layers:
+                    offloader._install_hooks(layer)
                 offloader.plans = {
                     i: _Plan(device, slots[(i - 1) % 2], i) for i in range(1, count)
                 }
@@ -177,18 +200,18 @@ class TestDfcWeightOffload(CustomTestCase):
                             device.compute = _Stream(device)
                             device.computes.append(device.compute)
                         for index in range(count):
-                            offloader.on_layer_enter(index)
-                            with offloader.moe_scope(index):
-                                def read(index=index, epoch=epoch):
-                                    value = (
-                                        0 if index == 0 else slots[(index - 1) % 2][0]
-                                    )
-                                    self.assertEqual(value, index)
-                                    observed.append((epoch, value))
-                                    return True
+                            def read(index=index, epoch=epoch):
+                                value = 0 if index == 0 else slots[(index - 1) % 2][0]
+                                self.assertEqual(value, index)
+                                observed.append((epoch, value))
+                                return True
 
-                                device.compute.enqueue(read)
+                            offloader.layers[index](
+                                lambda read=read: device.compute.enqueue(read)
+                            )
                     device.drain()
+                for hook in offloader.hooks:
+                    hook.remove()
                 self.assertEqual(
                     observed, [(e, i) for e in range(8) for i in range(count)]
                 )
@@ -210,6 +233,36 @@ class TestDfcWeightOffload(CustomTestCase):
                     raise RuntimeError("consumer failed")
             with self.assertRaises(RuntimeError):
                 offloader.on_layer_enter(0)
+
+    def test_hook_failures_stop_reuse_before_or_inside_moe(self):
+        """always_call hooks must poison the ring when an attention/MLP call raises."""
+        for where in ("attention", "moe"):
+            with self.subTest(where=where):
+                with get_context().override_server_args():
+                    offloader = DfcOffloader()
+                device = _Device()
+                offloader.device = "fake"
+                offloader.stream = device.copy
+                offloader.ready_for_forward = True
+                layer = _Decoder(3)
+                layer.fail_attention = where == "attention"
+                offloader.layers = [layer]
+                offloader._install_hooks(layer)
+
+                def fail():
+                    raise RuntimeError("moe failed")
+
+                try:
+                    with patch.object(torch, "npu", device, create=True):
+                        with self.assertRaisesRegex(RuntimeError, f"{where} failed"):
+                            layer(fail)
+                        self.assertTrue(offloader.failed)
+                        self.assertIsNone(offloader.moe_context)
+                        with self.assertRaises(RuntimeError):
+                            layer(lambda: None)
+                finally:
+                    for hook in offloader.hooks:
+                        hook.remove()
 
 
 if __name__ == "__main__":

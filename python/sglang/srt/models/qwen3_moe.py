@@ -307,6 +307,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         if (
             not is_deepep_class_backend()
             and not get_moe_a2a_backend().is_ascend_fuseep()
+            and not get_moe_a2a_backend().is_ascend_dfc()
         ):
             return self.forward_normal(hidden_states)
         else:

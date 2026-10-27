@@ -75,15 +75,18 @@ class DfcOffloader(DfcModelAdapter):
         self.epoch = 0
         self.failed = False
         self.ready_for_forward = False
+        self.hooks = []
+        self.moe_context = None
 
     def wrap_modules(self, all_modules_generator, **kwargs):
         modules = []
         for decoder in all_modules_generator:
             index = self._register_layer(decoder)
             modules.append(decoder)
-            if not self.enabled:
+            if index is None or not self.enabled:
                 continue
-            decoder._dfc_weight_offloader = self
+            moe = decoder.mlp
+            self._install_hooks(decoder)
             decoder._derived_weight_cache_error = (
                 "Online weight updates are unsupported with immutable "
                 "MemFabric DFC weight bundles"
@@ -105,6 +108,52 @@ class DfcOffloader(DfcModelAdapter):
                         _bind(owner, name, value.detach().to("cpu"))
         self._publish()
         return modules
+
+    def _install_hooks(self, decoder):
+        self.hooks.extend(
+            (
+                decoder.register_forward_pre_hook(self._before_decoder),
+                decoder.register_forward_hook(self._after_decoder, always_call=True),
+                decoder.mlp.register_forward_pre_hook(self._before_moe),
+                decoder.mlp.register_forward_hook(self._after_moe, always_call=True),
+            )
+        )
+
+    def _before_decoder(self, decoder, args):
+        try:
+            self.on_layer_enter(decoder.layer_id)
+        except BaseException:
+            self.failed = True
+            raise
+
+    def _after_decoder(self, decoder, args, output):
+        if output is None:
+            # Attention can fail before the MoE is entered. Stop the ring even
+            # though no MoE exit hook ran; PyTorch preserves the original error.
+            self.failed = True
+
+    def _before_moe(self, moe, args):
+        if self.moe_context is not None:
+            self.failed = True
+            raise RuntimeError("DFC does not support nested/interleaved MoE forwards")
+        context = self.moe_scope(moe.layer_id)
+        try:
+            context.__enter__()
+        except BaseException:
+            self.failed = True
+            raise
+        self.moe_context = context
+
+    def _after_moe(self, moe, args, output):
+        context, self.moe_context = self.moe_context, None
+        if context is None:
+            self.failed = True
+            return
+        if output is None:
+            error = RuntimeError("DFC MoE forward failed")
+            context.__exit__(RuntimeError, error, None)
+        else:
+            context.__exit__(None, None, None)
 
     def postprocess_module(self, module, quant_method, target_device):
         component = self.components.get(id(module))
@@ -314,7 +363,7 @@ class DfcOffloader(DfcModelAdapter):
             if index + 1 in self.events:
                 self.compute.wait_event(self.events[index + 1][0])
             yield
-            alt = self.layers[index].mlp.alt_stream
+            alt = getattr(self.layers[index].mlp, "alt_stream", None)
             if alt is not None:
                 self.compute.wait_stream(alt)
             consumed = torch.npu.Event()
@@ -342,6 +391,9 @@ class DfcOffloader(DfcModelAdapter):
             self.compute.synchronize()
         if self.stream is not None:
             self.stream.synchronize()
+        for hook in self.hooks:
+            hook.remove()
+        self.hooks.clear()
         for plan in self.plans.values():
             plan.close()
         if self.offload is not None:

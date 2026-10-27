@@ -18,7 +18,9 @@ DFC 的独立接入和全 HBM 用法见 [README_DFC.md](README_DFC.md)。
 - `--moe-weight-offload-backend none` 为全 HBM 的 DFC 对照。
 - `--moe-weight-offload-backend memfabric` 保留首个实际 MoE 的专家权重，后续层使用两个 HBM 槽。
 - Routed W13/W2、scale、offset 和独立 shared MLP 的执行 Tensor 一起卸载。
-- 每层开始时提交下一 MoE 的搬运，MoE 入口等待 ready，全部 routed/shared 读取后记录 consumed。
+- 在实际 MoE decoder 的入口提交下一 MoE 的搬运，MoE 模块入口等待 ready，全部 routed/shared 读取后记录 consumed。
+- DeepSeek/GLM 前导 dense 层原样保留，不占用 MoE 层索引；首个实际 MoE 常驻，后续槽按实际 MoE 序号轮转。
+- 预取边界通过 eager module hooks 接入，不改模型 Attention 或模型前向主体；退出时移除 hooks。
 - 不重排 Attention 或 IndexCache；warmup/serving 更换计算流时通过设备事件串行交接。
 - 带版本独立的事件跨 forward 保活，避免奇偶层数、连续 chunk 之间覆盖旧读者。
 
@@ -28,7 +30,10 @@ DFC 通信元数据设为 8192 KiB；mixed allocator 的初始化提前到 KV �
 
 ## 首版支持范围与限制
 
-目标为 A3、DeepSeek-V4、本地 ModelSlim W8A8、BF16 激活、PP1、MoE TP1、固定 EP、eager。
+目标为 A3、本地 ModelSlim W8A8、BF16 激活、PP1、MoE TP1、固定 EP、eager。
+模型路径覆盖 Qwen3-MoE、DeepSeek-V3/V3.2/R1、普通 GLM-5.3，详细 model type 见 README_DFC.md。
+已撤回 V4 专用接入；DeepSeek-V4 和 GLM-5.3-Flash 因裁剪语义不受当前 DFC 支持。
+模型路径适配完成不代表某个实际 checkpoint 已通过精度和性能验收。
 当前 native DFC 限制 EP 不超过 16，总专家数不超过 4096 且能被 EP 整除。
 共享专家融合、TBO/SBO、CP/DCP、投机解码、EPLB、冗余专家、DWDP、LoRA、memory saver、
 通用 CPU offloader、CPU 权重备份、torch.compile、运行期 PD 角色切换和 remote/IPC 加载器
@@ -36,7 +41,7 @@ DFC 通信元数据设为 8192 KiB；mixed allocator 的初始化提前到 KV �
 Decode 继续使用原有部署后端。普通 host KV 缓存可以保留，MemFabric HiCache 不能与权重池共用实体。
 
 DFC 当前接口不能表达 routed SwiGLU clamp 或非零 expert weight offset。
-遇到非零 `swiglu_limit`、非 W8A8 scheme 或非零 offset 时会拒绝加载，不静默忽略。
+遇到已配置的 `swiglu_limit`（包括显式零）、非 W8A8 scheme 或非零 offset 时会拒绝加载。
 目标 checkpoint 必须先通过这些语义检查。
 
 首版复用原生 checkpoint loader：模型构造时把后续层专家参数移到 CPU，
@@ -64,12 +69,12 @@ DFC 当前接口不能表达 routed SwiGLU clamp 或非零 expert weight offset�
 八卡示例（两个 rendezvous 分别用于 ZBAL 和 MemFabric，需使用各自独立端点）：
 
 ```bash
-export MODEL_PATH=/path/to/DeepSeek-V4-Flash-w8a8
+export MODEL_PATH=/path/to/Qwen3-30B-A3B-W8A8
 export POOL_CONFIG=/path/to/dfc_weight_pool.json
 # 按现有机器的 ZBAL 内存预算设置 SGLANG_ZBAL_LOCAL_MEM_SIZE（单位 MiB）
 # 并设置本 Prefill 作业的 SGLANG_ZBAL_BOOTSTRAP_URL。
 
-bash test/manual/ascend/launch_dsv4_dfc_prefill.sh "$MODEL_PATH" "$POOL_CONFIG" \
+bash test/manual/ascend/launch_dfc_prefill.sh "$MODEL_PATH" "$POOL_CONFIG" \
     --trust-remote-code \
     --tp-size 8 --ep-size 8 --enable-dp-attention --dp-size 8 \
     --page-size 128 \
@@ -78,7 +83,8 @@ bash test/manual/ascend/launch_dsv4_dfc_prefill.sh "$MODEL_PATH" "$POOL_CONFIG" 
     --disaggregation-transfer-backend ascend
 ```
 
-其余 PD 地址、端口、NIC 和 Decode 连接参数沿用已有部署。
+其余 PD 地址、端口、NIC、模型对应的 Attention 后端和 Decode 连接参数沿用已有部署。
+脚本不再强制 `--attention-backend dsv4`；使用目标模型已验证的后端或平台默认解析。
 新后端在配置解析中关闭图执行，无需沿用旧分支的 `--attn-dp-size` 参数。
 多机场景必须维持本机 TP rank 数相等，并在启动前验证外部共享池/SDMA 的实际拓扑可达性。
 
@@ -94,11 +100,12 @@ KV 定容前会按当前 native 分配公式扣除 workspace 上界，保留原�
 所有可能触发编译的测试/启动仍需用户明确授权，并在指定镜像中使用现成完整构建流程。
 源码中未添加自动构建或安装步骤。
 
-- CPU 模拟用例：`test/registered/unit/npu/test_dfc_weight_offload.py`。
-  覆盖容量对齐、非法配置、storage view、1–5 层的连续 forward、stream 交接和失败后禁止复用。
+- CPU 用例：`test/registered/unit/npu/test_dfc_model_adapter.py`、`test_dfc_weight_offload.py`。
+  覆盖模型准入、dense 前缀、实际 MoE 序号、Qwen 缺少 shared/alt 属性、配置和物理布局，
+  以及真实 module hooks 配合模拟复制队列的连续 forward、stream 交接和异常后禁止复用；尚未执行。
 - A3 先对照全 HBM DFC 与原算子，确认 scale、gate/up、routed scaling、shared 和零 token rank。
 - 再对照全 HBM DFC 与共享池预取 DFC，检查恢复后的权重、logits 和完整生成结果。
-- PD 验证保持 Decode 配置一致，覆盖多 chunk、IndexCache、hc-pre-from-prev 和不同 rank 的 token 数。
+- PD 验证保持 Decode 配置一致，覆盖多 chunk、DeepSeek/GLM IndexCache 和不同 rank 的 token 数。
 - 固定 KV 容量测权重 HBM 释放量，再固定 HBM 预算测可用 KV 容量与吞吐。
 - 记录启动/运行峰值、CPU/DRAM 峰值、ready 等待、DFC 退化、TTFT P50/P99、KV 传输时延。
 

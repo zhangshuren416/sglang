@@ -43,6 +43,7 @@ def workspace_budget_bytes(rows, hidden, intermediate, experts, ep, topk, capaci
     init_routing = rows * topk * 32 + 512 * 2 * 4 + (16 << 20)
     return aligned((16 << 20) + sum(aligned(s) for s in sections) + init_routing)
 
+
 class DfcRuntime:
     def __init__(self, device: torch.device, layer):
         import torch.distributed as dist
