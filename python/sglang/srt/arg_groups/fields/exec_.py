@@ -699,6 +699,7 @@ class ExecMoe(msgspec.Struct):
             "nixl",
             "mori",
             "ascend_fuseep",
+            "ascend_dfc",
             "flashinfer",
             "megamoe",
             "deepep_v2",
@@ -715,6 +716,7 @@ class ExecMoe(msgspec.Struct):
                 "nixl",
                 "mori",
                 "ascend_fuseep",
+                "ascend_dfc",
                 "flashinfer",
                 "megamoe",
                 "deepep_v2",
@@ -761,6 +763,11 @@ class ExecMoe(msgspec.Struct):
         Literal[1, 2],
         "Select the mode when enable Ascend FuseEP MoE, 1 -> dispatch_gmm_combine_decode is executed；2 -> dispatch_ffn_combine is executed (support hybrid deployment when 2).",
     ] = 2
+    dfc_max_output_tokens: A[
+        Optional[int],
+        "A3 DFC receive capacity in top-k-expanded rows. By default reserve "
+        "the worst case from the prefill token limits and EP width.",
+    ] = None
     deepep_dispatcher_output_dtype: A[
         Literal["auto", "bf16", "fp8", "int8", "nvfp4"],
         "Select DeepEP dispatcher output dtype",

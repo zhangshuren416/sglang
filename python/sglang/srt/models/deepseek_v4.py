@@ -5737,6 +5737,11 @@ class DeepseekV4ForCausalLM(nn.Module):
             )
         }
         if unloaded_params:
+            if get_moe_a2a_backend().is_ascend_dfc():
+                raise ValueError(
+                    "DFC requires complete checkpoint state before publishing immutable "
+                    f"weight bundles; missing: {sorted(unloaded_params)}"
+                )
             logger.warning(
                 f"Some weights are not initialized from checkpoints: {unloaded_params}"
             )

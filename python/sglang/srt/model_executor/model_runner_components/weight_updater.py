@@ -154,6 +154,12 @@ class WeightUpdater:
         param.data is the daemon's master copy shared with every co-attached
         engine, so an in-place update would silently corrupt them all.
         """
+        from sglang.srt.runtime_context import get_exec
+
+        if get_exec().moe.moe_a2a_backend == "ascend_dfc":
+            raise RuntimeError(
+                f"{op} is unsupported for the immutable DFC execution layout"
+            )
         mode = get_model().weight_cache_mode
         if mode != "off":
             raise RuntimeError(

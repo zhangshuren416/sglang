@@ -171,9 +171,10 @@ def create_moe_dispatcher(
         or a2a_backend.is_megamoe()
         or a2a_backend.is_flashinfer_megamoe()
         or a2a_backend.is_ascend_fuseep()
+        or a2a_backend.is_ascend_dfc()
     ):
-        # ascend_fuseep bypasses the dispatcher abstraction (see
-        # forward_fuseep in hardware_backend/npu/moe/fuseep.py); a
+        # Ascend fused backends bypass the dispatcher abstraction (see
+        # hardware_backend/npu/moe/{fuseep,dfc}.py); a
         # StandardDispatcher is created but never invoked.
         # flashinfer_megamoe does its EP all-to-all inside the kernel, so the
         # dispatcher stays a pure noop passthrough.
@@ -543,6 +544,7 @@ class FusedMoE(torch.nn.Module):
         if expert_mask is not None:
             self.register_buffer("expert_mask_gpu", expert_mask, persistent=False)
         self._use_ascend_fuseep = get_moe_a2a_backend().is_ascend_fuseep()
+        self._use_ascend_dfc = get_moe_a2a_backend().is_ascend_dfc()
         # Expose swigluoai alpha/clamp on the layer so deepep's W8A8 apply
         # (apply_without_routing_weights) picks swiglu_oai_quant instead of plain
         # npu_swiglu. fuseep injects these via fuseep_activation (aclnnFusedDeepMoe
@@ -1524,6 +1526,10 @@ class FusedMoE(torch.nn.Module):
         topk_output: TopKOutput,
         pre_quant_input: Optional[Tuple] = None,
     ):
+        if self._use_ascend_dfc:
+            from sglang.srt.hardware_backend.npu.moe.dfc import forward_dfc
+
+            return forward_dfc(self, hidden_states, topk_output)
         if self._use_ascend_fuseep:
             from sglang.srt.hardware_backend.npu.moe.fuseep import forward_fuseep
 

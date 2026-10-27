@@ -56,6 +56,7 @@ from sglang.srt.runtime_context import (
     derive_parallel_widths,
     get_global_dwdp_manager,
     get_parallel,
+    get_resources,
     set_global_dwdp_manager,
 )
 from sglang.srt.utils import (
@@ -3217,6 +3218,11 @@ def destroy_model_parallel():
     """Set the groups to none and destroy them."""
     from sglang.srt.distributed.bootstrap import reset_parallel_initialised
 
+    dfc = get_resources().buffers.get("ascend_dfc_model_adapter")
+    if dfc is not None:
+        # DFC adapters release their runtime before its CPU/EP groups disappear.
+        dfc.close()
+        get_resources().buffers.pop("ascend_dfc_model_adapter", None)
     reset_parallel_initialised()
     get_parallel().clear_stamp()
     dwdp_mgr = get_global_dwdp_manager()

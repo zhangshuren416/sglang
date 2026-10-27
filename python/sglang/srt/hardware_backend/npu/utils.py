@@ -331,6 +331,16 @@ def get_indexer_weight_stream():
     return indexer_weight_stream
 
 
+def _zbal_init_options():
+    from sglang.srt.runtime_context import get_exec
+
+    # DFC partitions this exchange space into state windows. The vendor
+    # default is too small for its soft-sync offsets; the DFC sample uses 8 MiB.
+    if get_exec().moe.moe_a2a_backend == "ascend_dfc":
+        return {"comm_meta_space_size": 8192}  # vendor interface uses KiB
+    return {}
+
+
 def init_zbal(world_size, gpu_id, world_rank, do_check=True):
     """
     init zbal, if is mix alloc mode, only register for sma & comm
@@ -354,9 +364,16 @@ def init_zbal(world_size, gpu_id, world_rank, do_check=True):
                 world_rank,
                 zbal_mem_size * (1024**2),
                 ip_port=envs.SGLANG_ZBAL_BOOTSTRAP_URL.get(),
+                **_zbal_init_options(),
             )
         else:
-            ret = zbal_init(world_size, gpu_id, world_rank, zbal_mem_size * (1024**2))
+            ret = zbal_init(
+                world_size,
+                gpu_id,
+                world_rank,
+                zbal_mem_size * (1024**2),
+                **_zbal_init_options(),
+            )
 
         gva_is_inited = True
 
@@ -382,6 +399,11 @@ def lazy_init_zbal_gva_mem(
         return 1
 
     global gva_is_inited
+    from sglang.srt.runtime_context import get_exec
+
+    if gva_is_inited and get_exec().moe.moe_a2a_backend == "ascend_dfc":
+        # DFC initializes before KV sizing so its communication metadata is budgeted.
+        return 1
     from sglang.srt.utils.common import get_available_gpu_memory
 
     # TODO need to use allgather if you want use total_memory stats from mem_get_info as unbalance os
@@ -410,9 +432,16 @@ def lazy_init_zbal_gva_mem(
             world_rank,
             gva_in_mb * (1024**2),
             ip_port=envs.SGLANG_ZBAL_BOOTSTRAP_URL.get(),
+            **_zbal_init_options(),
         )
     else:
-        res = zbal_init(world_size, gpu_id, world_rank, gva_in_mb * (1024**2))
+        res = zbal_init(
+            world_size,
+            gpu_id,
+            world_rank,
+            gva_in_mb * (1024**2),
+            **_zbal_init_options(),
+        )
 
     gva_is_inited = True
     if do_check and not res:

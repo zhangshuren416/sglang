@@ -85,6 +85,7 @@ from sglang.srt.runtime_context import (
     get_memory,
     get_mm,
     get_parallel,
+    get_resources,
     get_schedule,
     get_spec,
     max_speculative_num_draft_tokens,
@@ -2193,6 +2194,18 @@ class KVCacheConfigurator:
             distributed=get_parallel().launch_world_size > 1,
             cpu_group=get_parallel().world_group.cpu_group,
         )
+        dfc = get_resources().buffers.get("ascend_dfc_runtime")
+        if dfc is not None:
+            # Native DFC allocates this scratch in forward. Do not let the KV
+            # pool consume the HBM that the fixed receive capacity requires.
+            reserve_gb = dfc.workspace_budget_bytes / (1 << 30)
+            available_gpu_memory -= reserve_gb
+            logger.info("DFC runtime workspace reservation: %.2f GB", reserve_gb)
+            if available_gpu_memory <= 0:
+                raise ValueError(
+                    "DFC workspace exceeds available HBM; reduce prefill token limits "
+                    "or --dfc-max-output-tokens before sizing the KV cache"
+                )
 
         slack_gb = pre_model_load_memory * (1 - get_schedule().mem_fraction_static)
         if self.mambaish_config is not None and self.post_capture_kv_active:

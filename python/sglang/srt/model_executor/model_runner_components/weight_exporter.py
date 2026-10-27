@@ -15,6 +15,15 @@ from sglang.srt.utils.network import NetworkAddress
 logger = logging.getLogger(__name__)
 
 
+def _assert_exportable():
+    from sglang.srt.runtime_context import get_exec
+
+    if get_exec().moe.moe_a2a_backend == "ascend_dfc":
+        raise RuntimeError(
+            "DFC packed/offloaded parameters cannot be exported as a checkpoint"
+        )
+
+
 @dataclass(slots=True, kw_only=True)
 class WeightExporter:
     tp_rank: int
@@ -81,6 +90,7 @@ class WeightExporter:
         ports,
         group_name,
     ):
+        _assert_exportable()
         assert torch.distributed.is_initialized(), (
             "Default torch process group must be initialized"
         )
@@ -124,6 +134,7 @@ class WeightExporter:
         return success, message
 
     def save_remote_model(self: WeightExporter, url: str):
+        _assert_exportable()
         from sglang.srt.model_loader.loader import RemoteModelLoader
 
         logger.info(f"Saving model to {url}")
@@ -135,6 +146,7 @@ class WeightExporter:
         pattern: Optional[str] = None,
         max_size: Optional[int] = None,
     ):
+        _assert_exportable()
         from sglang.srt.model_loader.loader import ShardedStateLoader
 
         logger.info(
@@ -150,6 +162,7 @@ class WeightExporter:
         Only used for unit test with an unoptimized performance.
         For optimized performance, please use torch.save and torch.load.
         """
+        _assert_exportable()
         # TODO: (chenyang) Add support for Qwen models.
         try:
             return self.get_model().get_weights_by_name(

@@ -66,6 +66,12 @@ def set_offloader(instance: BaseOffloader):
 
 
 def create_offloader():
+    if get_exec().moe.moe_a2a_backend == "ascend_dfc":
+        from sglang.srt.hardware_backend.npu.moe.dfc_model_adapter import (
+            DfcModelAdapter,
+        )
+
+        return DfcModelAdapter()
     if get_exec().offload.cpu_offload_gb > 0:
         return OffloaderV1(
             cpu_offload_max_bytes=int(get_exec().offload.cpu_offload_gb * 1024**3)
