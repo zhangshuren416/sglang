@@ -7,8 +7,11 @@ import logging
 from collections import deque
 from contextlib import contextmanager
 
+import acl
 import torch
 import torch.distributed as dist
+import torch_npu
+from memfabric_hybrid import offload
 
 from sglang.srt.hardware_backend.npu.moe.weight_offload_config import (
     WeightPoolConfig,
@@ -20,6 +23,8 @@ from sglang.srt.runtime_context import get_exec, get_parallel, get_resources, ge
 from sglang.srt.utils.offloader import BaseOffloader
 
 logger = logging.getLogger(__name__)
+
+_ACL_MEMCPY_DEVICE_TO_DEVICE = 3
 
 WEIGHT_OFFLOAD_MODEL_DECODERS = {
     "qwen3_moe": "Qwen3MoeDecoderLayer",
@@ -258,8 +263,6 @@ class MemFabricMoEOffloader(BaseOffloader):
         return True
 
     def _capture(self, index, key, owner, name, source):
-        import torch_npu
-
         layout = physical_layout(source, torch_npu.get_npu_format(source))
         if index == 1:
             if key in self.layouts:
@@ -290,8 +293,6 @@ class MemFabricMoEOffloader(BaseOffloader):
         _bind(owner, name, self.slots[slot_for_layer(index)][key])
 
     def _initialize_pool(self):
-        from memfabric_hybrid import offload
-
         for name in (
             "OffloadConfig",
             "Scene",
@@ -299,7 +300,6 @@ class MemFabricMoEOffloader(BaseOffloader):
             "uninitialize",
             "malloc",
             "free",
-            "sparse_copy",
             "SdmaCopyPlan",
         ):
             if not hasattr(offload, name):
@@ -371,42 +371,42 @@ class MemFabricMoEOffloader(BaseOffloader):
     def _export(self, index, key, source):
         """Load-time raw NZ/ND bytes; no logical Tensor copy or format conversion."""
         size = self.layouts[key][-1]
-        # Imported SHARED GVAs can be used directly by sparse_copy and SDMA.
+        rank = get_parallel().tp_rank
+        # SHARED uses a unified GVA/DVA mapping, including imported slices.
         # Non-owner ranks must never call malloc/empty on their zero-sized slot.
         destination = (
             self.pool_base
-            + get_parallel().tp_rank * self.rank_payload_bytes
+            + rank * self.rank_payload_bytes
             + (index - 1) * self.layer_payload_bytes
             + self.tensor_offsets[key]
         )
-        self.sources[index, key] = destination
-        # sparse_copy lengths are uint8 element counts. Split below signed int32 limits.
-        chunks = [min(8 << 20, size - offset) for offset in range(0, size, 8 << 20)]
-        offsets = list(range(0, size, 8 << 20))
-        source_ptrs = torch.tensor(
-            [source.data_ptr() + offset for offset in offsets],
-            dtype=torch.int64,
-            device=self.device,
-        )
-        destination_ptrs = torch.tensor(
-            [destination + offset for offset in offsets],
-            dtype=torch.int64,
-            device=self.device,
-        )
-        lengths = torch.tensor(chunks, dtype=torch.int32, device=self.device)
-        count = torch.tensor(len(chunks), dtype=torch.int32, device=self.device)
-        if (
-            self.offload.sparse_copy(
-                source_ptrs, destination_ptrs, lengths, count, self.device
-            )
-            != 0
-        ):
+        source_ptr = source.data_ptr()
+        try:
+            with torch.npu.device(self.device):
+                # Drain torch postprocessing before submitting raw ACL work.
+                stream = torch.npu.current_stream(self.device)
+                stream.synchronize()
+                result = acl.rt.memcpy_async(
+                    destination,
+                    size,
+                    source_ptr,
+                    size,
+                    _ACL_MEMCPY_DEVICE_TO_DEVICE,
+                    stream.npu_stream,
+                )
+                if result != 0:
+                    raise RuntimeError(
+                        "MoE weight export acl.rt.memcpy_async D2D failed: "
+                        f"rank={rank} layer={index} tensor={key} bytes={size} "
+                        f"src={source_ptr:#x} dst={destination:#x} ret={result}"
+                    )
+                # Keep source alive until all physical bytes have been copied.
+                stream.synchronize()
+        except Exception:
             self.failed = True
-            raise RuntimeError(
-                f"MoE weight export failed: layer={index} tensor={key}"
-            )
-        # Initialization only: source scratch and descriptors live until this fence.
-        torch.npu.current_stream(self.device).synchronize()
+            raise
+        # The copy has finished; publish only completed exports.
+        self.sources[index, key] = destination
 
     def post_init(self):
         if self.enabled and self.processed != self.expected:
