@@ -15,16 +15,10 @@ from sglang.srt.model_executor.cuda_graph_config import (
 
 def handle_dfc_config(server_args):
     cfg = resolving_view(server_args)
-    enabled = cfg.moe_weight_offload_backend == "memfabric"
     if cfg.moe_a2a_backend != "ascend_dfc":
-        if (
-            enabled
-            or cfg.moe_weight_offload_config is not None
-            or cfg.dfc_max_output_tokens is not None
-        ):
+        if cfg.dfc_max_output_tokens is not None:
             raise ValueError(
-                "DFC weight offload/capacity options require "
-                "--moe-a2a-backend ascend_dfc"
+                "--dfc-max-output-tokens requires --moe-a2a-backend ascend_dfc"
             )
         return
     if cfg.device not in (None, "npu") or cfg.quantization != "modelslim":
@@ -99,32 +93,6 @@ def handle_dfc_config(server_args):
         )
     if cfg.weight_cache_mode != "off":
         raise ValueError("ascend_dfc cannot attach to an IPC weight cache")
-    if enabled:
-        if cfg.disaggregation_mode != "prefill":
-            raise ValueError(
-                "MemFabric MoE weight offload requires a PD prefill instance"
-            )
-        if not cfg.moe_weight_offload_config:
-            raise ValueError(
-                "MemFabric MoE weight offload requires --moe-weight-offload-config"
-            )
-        if cfg.enable_hierarchical_cache:
-            from sglang.srt.mem_cache.pool_host.npu_memfabric import (
-                memfabric_host_memory_enabled,
-            )
-
-            if memfabric_host_memory_enabled():
-                raise ValueError(
-                    "DFC weights and HiCache cannot share the MemFabric offload entity"
-                )
-        from sglang.srt.hardware_backend.npu.moe.dfc_config import WeightPoolConfig
-
-        WeightPoolConfig.read(cfg.moe_weight_offload_config)
-    elif cfg.moe_weight_offload_config is not None:
-        raise ValueError(
-            "--moe-weight-offload-config requires "
-            "--moe-weight-offload-backend memfabric"
-        )
     # This hook also runs before the generic graph parser; the raw default is None.
     graph = cfg.cuda_graph_config or CudaGraphConfig()
     graph = with_phase(graph, Phase.PREFILL, backend=Backend.DISABLED)

@@ -1,7 +1,5 @@
 {
-  "schema_version": 1,
-  "pool_id": "dfc-prefill-unique-job",
   "store_url": "tcp://POOL_STORE_HOST:18570",
-  "reserve_bytes_per_rank": "auto",
+  "reserve_bytes": "auto",
   "sdma_channels": 4
 }

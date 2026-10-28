@@ -933,13 +933,13 @@ class ExecOffload(msgspec.Struct):
     moe_weight_offload_backend: A[
         Literal["none", "memfabric"],
         Arg(
-            help="Expert weight storage for eager A3 DFC prefill.",
+            help="Expert weight storage for eager Ascend MoE execution, independent of the compute backend.",
             choices=["none", "memfabric"],
         ),
     ] = "none"
     moe_weight_offload_config: A[
         Optional[str],
-        "JSON file configuring the MemFabric SHARED weight pool for A3 DFC.",
+        "JSON file configuring the MemFabric SHARED expert weight pool on Ascend.",
     ] = None
     ple_offload_embedding: A[
         Optional[bool],

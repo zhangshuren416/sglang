@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import torch
 
 from sglang.srt.hardware_backend.npu.moe.dfc_model_adapter import DfcModelAdapter
-from sglang.srt.hardware_backend.npu.moe.dfc_offload import DfcOffloader
+from sglang.srt.hardware_backend.npu.moe.weight_offload import MemFabricMoEOffloader
 from sglang.srt.runtime_context import get_context, get_resources
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
@@ -70,11 +70,10 @@ class _Decoder(torch.nn.Module):
 
 
 def _decoder(model_type, layer_id, sparse=True):
-    name = (
-        "Qwen3MoeDecoderLayer"
-        if model_type == "qwen3_moe"
-        else "DeepseekV2DecoderLayer"
-    )
+    name = {
+        "qwen3_moe": "Qwen3MoeDecoderLayer",
+        "deepseek_v4": "DeepseekV4DecoderLayer",
+    }.get(model_type, "DeepseekV2DecoderLayer")
     return type(name, (_Decoder,), {})(model_type, layer_id, sparse)
 
 
@@ -128,16 +127,12 @@ class TestDfcModelAdapter(CustomTestCase):
         """Exercise the real wrapper before any checkpoint/pool native operation."""
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "pool.json"
-            config.write_text(
-                json.dumps(
-                    {"schema_version": 1, "pool_id": "unit", "store_url": "tcp://h:1"}
-                )
-            )
+            config.write_text(json.dumps({"store_url": "tcp://h:1"}))
             with get_context().override_server_args(
                 moe_weight_offload_backend="memfabric",
                 moe_weight_offload_config=str(config),
             ):
-                offloader = DfcOffloader()
+                offloader = MemFabricMoEOffloader()
                 dense = _decoder("deepseek_v3", 0, False)
                 first, second = _decoder("deepseek_v3", 3), _decoder("deepseek_v3", 5)
                 try:
@@ -155,7 +150,56 @@ class TestDfcModelAdapter(CustomTestCase):
                 finally:
                     for hook in offloader.hooks:
                         hook.remove()
-                    get_resources().buffers.pop("ascend_dfc_model_adapter", None)
+                    get_resources().buffers.pop("moe_weight_offloader", None)
+
+
+class TestMemFabricModelAdmission(CustomTestCase):
+    def test_v4_activation_and_hash_routing_do_not_require_dfc(self):
+        """Weight transport must leave native SiTU/clipping/router metadata intact."""
+        with get_context().override_server_args():
+            offloader = MemFabricMoEOffloader()
+        for layer_id, activation in enumerate(("swigluoai", "situ")):
+            decoder = _decoder("deepseek_v4", layer_id)
+            decoder.config.hidden_act = activation
+            decoder.config.swiglu_limit = 10.0
+            runner = decoder.mlp.experts.moe_runner_config
+            runner.activation = activation
+            runner.gemm1_alpha = 1.702
+            runner.gemm1_clamp_limit = 10.0
+            # Router metadata can differ while the physical expert shapes agree.
+            decoder.mlp.experts.top_k = layer_id + 1
+            self.assertEqual(offloader._register_layer(decoder), layer_id)
+            self.assertIs(decoder.mlp.experts.moe_runner_config, runner)
+            self.assertEqual(runner.gemm1_clamp_limit, 10.0)
+        self.assertIsNone(offloader.execution_adapter)
+
+    def test_v4_prefetch_does_not_make_v4_a_dfc_model(self):
+        with get_context().override_server_args():
+            offloader = MemFabricMoEOffloader(execution_adapter=DfcModelAdapter())
+        with self.assertRaisesRegex(ValueError, "no adapter"):
+            offloader._register_layer(_decoder("deepseek_v4", 0))
+        self.assertFalse(offloader.layers)
+
+    def test_nonuniform_weight_geometry_cannot_reuse_the_same_slots(self):
+        with get_context().override_server_args():
+            offloader = MemFabricMoEOffloader()
+        offloader._register_layer(_decoder("deepseek_v4", 0))
+        second = _decoder("deepseek_v4", 1)
+        second.mlp.experts.w2_weight.shape = (2, 64, 64)
+        with self.assertRaisesRegex(ValueError, "uniform"):
+            offloader._register_layer(second)
+
+    def test_resident_single_layer_post_init_does_not_create_dfc_runtime(self):
+        with get_context().override_server_args():
+            offloader = MemFabricMoEOffloader()
+        offloader.enabled = True
+        offloader.layers = [_decoder("deepseek_v4", 0)]
+        resources = get_resources().buffers
+        before = dict(resources)
+        offloader.post_init()
+        self.assertTrue(offloader.ready_for_forward)
+        self.assertIsNone(offloader.offload)
+        self.assertEqual(resources, before)
 
 
 if __name__ == "__main__":

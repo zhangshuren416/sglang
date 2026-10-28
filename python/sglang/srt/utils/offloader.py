@@ -69,11 +69,21 @@ def set_offloader(instance: BaseOffloader):
 
 
 def create_offloader():
-    if get_exec().moe.moe_a2a_backend == "ascend_dfc":
-        if get_exec().offload.moe_weight_offload_backend == "memfabric":
-            from sglang.srt.hardware_backend.npu.moe.dfc_offload import DfcOffloader
+    # Weight transport is selected independently of the MoE compute backend.
+    if get_exec().offload.moe_weight_offload_backend == "memfabric":
+        from sglang.srt.hardware_backend.npu.moe.weight_offload import (
+            MemFabricMoEOffloader,
+        )
 
-            return DfcOffloader()
+        execution_adapter = None
+        if get_exec().moe.moe_a2a_backend == "ascend_dfc":
+            from sglang.srt.hardware_backend.npu.moe.dfc_model_adapter import (
+                DfcModelAdapter,
+            )
+
+            execution_adapter = DfcModelAdapter()
+        return MemFabricMoEOffloader(execution_adapter=execution_adapter)
+    if get_exec().moe.moe_a2a_backend == "ascend_dfc":
         from sglang.srt.hardware_backend.npu.moe.dfc_model_adapter import (
             DfcModelAdapter,
         )

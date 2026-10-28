@@ -3218,11 +3218,13 @@ def destroy_model_parallel():
     """Set the groups to none and destroy them."""
     from sglang.srt.distributed.bootstrap import reset_parallel_initialised
 
-    dfc = get_resources().buffers.get("ascend_dfc_model_adapter")
-    if dfc is not None:
-        # DFC adapters release their runtime before its CPU/EP groups disappear.
-        dfc.close()
-        get_resources().buffers.pop("ascend_dfc_model_adapter", None)
+    # Drain weight copies/consumers while CPU/EP groups are still available.
+    # A weight offloader composes (and closes) an optional DFC compute adapter.
+    for key in ("moe_weight_offloader", "ascend_dfc_model_adapter"):
+        adapter = get_resources().buffers.get(key)
+        if adapter is not None:
+            adapter.close()
+            get_resources().buffers.pop(key, None)
     reset_parallel_initialised()
     get_parallel().clear_stamp()
     dwdp_mgr = get_global_dwdp_manager()

@@ -70,6 +70,11 @@ def run_resolution_pipeline(server_args: Any) -> None:
     from sglang.srt.arg_groups.memory_hook import handle_offload_compatibility
 
     run_hook(handle_offload_compatibility, server_args)
+    from sglang.srt.arg_groups.moe_weight_offload_hook import (
+        handle_moe_weight_offload_config,
+    )
+
+    run_hook(handle_moe_weight_offload_config, server_args)
     from sglang.srt.arg_groups.dfc_hook import handle_dfc_config
 
     run_hook(handle_dfc_config, server_args)
@@ -335,7 +340,8 @@ def run_resolution_pipeline(server_args: Any) -> None:
     run_hook(validate_deepep_v2_speculative_draft, server_args)
     run_hook(validate_deepep_v2_dispatch_token_budget, server_args)
 
-    # Recheck final model/platform resolutions and keep eager-only DFC graphs disabled.
+    # Recheck final model/platform resolutions for eager weight transport/DFC.
+    run_hook(handle_moe_weight_offload_config, server_args)
     run_hook(handle_dfc_config, server_args)
 
     server_args._resolution_finished = True
