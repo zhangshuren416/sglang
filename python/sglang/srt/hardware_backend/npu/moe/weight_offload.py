@@ -91,6 +91,7 @@ class MemFabricMoEOffloader(BaseOffloader):
         self.plans = {}
         self.offload = None
         self.stream = None
+        self.prefetch_barrier = None
         self.compute = None
         self.last_use = [None, None]
         self.inflight = deque()
@@ -356,6 +357,11 @@ class MemFabricMoEOffloader(BaseOffloader):
                 "MemFabric shared weight arena allocation failed on TP rank 0"
             )
         self.stream = get_stream("moe_weight_prefetch")
+        if parallel.tp_size > 1:
+            with torch.npu.stream(self.stream):
+                self.prefetch_barrier = torch.zeros(
+                    1, dtype=torch.int32, device=self.device
+                )
         for index, key, source in self.pending:
             self._export(index, key, source)
         self.pending.clear()
@@ -469,8 +475,19 @@ class MemFabricMoEOffloader(BaseOffloader):
             submitted, ready = torch.npu.Event(), torch.npu.Event()
             self.events[target] = (submitted, ready)
             with torch.npu.stream(self.stream):
+                # Normally this slot was consumed by the previous MoE, so its
+                # reuse fence also orders the collective after local combine.
                 if self.last_use[slot] is not None:
                     self.stream.wait_event(self.last_use[slot])
+                if index < 2:
+                    # At the forward boundary or after the resident first MoE,
+                    # the slot fence need not cover the immediately prior MoE.
+                    self.stream.wait_stream(self.compute)
+                if self.prefetch_barrier is not None:
+                    dist.all_reduce(
+                        self.prefetch_barrier,
+                        group=get_parallel().tp_group.device_group,
+                    )
                 self.plans[target].enqueue(submitted)
                 ready.record(self.stream)
 
@@ -523,6 +540,7 @@ class MemFabricMoEOffloader(BaseOffloader):
         self.hooks.clear()
         for plan in self.plans.values():
             plan.close()
+        self.prefetch_barrier = None
         if self.offload is not None:
             group = get_parallel().tp_group.cpu_group
             dist.barrier(group=group)
