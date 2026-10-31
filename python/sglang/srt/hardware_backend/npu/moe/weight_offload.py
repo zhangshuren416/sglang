@@ -367,11 +367,12 @@ class MemFabricMoEOffloader(BaseOffloader):
         self.pending.clear()
         logger.info(
             "MoE weight pool %s: owner=TP0 local payload=%d bytes "
-            "total payload=%d bytes reserve=%d bytes",
+            "total payload=%d bytes reserve=%d bytes sdma_backend=%s",
             self.config.store_url,
             self.rank_payload_bytes,
             required,
             reserve,
+            self.config.sdma_backend,
         )
 
     def _export(self, index, key, source):
@@ -438,6 +439,7 @@ class MemFabricMoEOffloader(BaseOffloader):
                     ],
                     self.device,
                     self.config.sdma_channels,
+                    backend=self.config.sdma_backend,
                 )
         if self.execution_adapter is not None:
             self.execution_adapter.post_init()

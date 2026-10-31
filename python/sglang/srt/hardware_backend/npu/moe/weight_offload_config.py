@@ -11,6 +11,7 @@ from pathlib import Path
 @dataclass(frozen=True)
 class WeightPoolConfig:
     store_url: str
+    sdma_backend: str
     reserve_bytes: int | str = "auto"
     sdma_channels: int = 4
 
@@ -21,6 +22,7 @@ class WeightPoolConfig:
             "store_url",
             "reserve_bytes",
             "sdma_channels",
+            "sdma_backend",
         }
         if not isinstance(data, dict) or set(data) - allowed:
             raise ValueError("Invalid MoE weight pool configuration keys")
@@ -40,7 +42,17 @@ class WeightPoolConfig:
         channels = data.get("sdma_channels", 4)
         if type(channels) is not int or not 1 <= channels <= 8:
             raise ValueError("MoE weight SDMA channels must be an integer in [1, 8]")
-        return cls(data["store_url"], reserve, channels)
+        backend = data.get("sdma_backend")
+        if backend not in ("aiv", "aicpu"):
+            raise ValueError(
+                "MoE weight pool requires explicit sdma_backend: 'aiv' or 'aicpu'"
+            )
+        return cls(
+            store_url=data["store_url"],
+            sdma_backend=backend,
+            reserve_bytes=reserve,
+            sdma_channels=channels,
+        )
 
 
 def slot_for_layer(index: int) -> int:
