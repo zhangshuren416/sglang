@@ -2047,6 +2047,17 @@ def exports_expert_balancedness_to_prometheus() -> bool:
     return get_exec().moe.expert_balancedness_report_mode in ("prometheus", "both")
 
 
+def is_weight_sharing_enabled() -> bool:
+    """Whether this Prefill worker participates in MoE weight sharing."""
+    context = get_context()
+    return (
+        context.is_config_namespace_published("exec")
+        and get_exec().moe.moe_weight_share_size > 0
+        and context.is_config_namespace_published("disagg")
+        and get_disagg().disaggregation_mode == "prefill"
+    )
+
+
 def cutedsl_moe_max_num_tokens() -> int:
     """Largest token count one forward routes through a CuteDSL MoE layer on one
     DP rank; sizes the standard-allgather wrapper, MegaMoE, and AR fusion buffers.

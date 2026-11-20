@@ -552,5 +552,9 @@ POSITIONAL_FIELD_ORDER = (
     "enable_return_aux_hidden_states",
     "aux_hidden_state_capture",
     "return_aux_hidden_state_layer_ids",
+    "moe_weight_share_size",
+    "moe_weight_share_rank",
+    "moe_weight_share_store_url",
+    "moe_weight_share_bytes",
 )
 # fmt: on

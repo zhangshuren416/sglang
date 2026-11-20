@@ -46,6 +46,57 @@ class UrmaHbmAllocator:
         self._limit = self._base + local_mem_size
         self._next_ptr = self._base
 
+    @property
+    def base_address(self) -> int:
+        return self._base
+
+    @property
+    def reserved_end_address(self) -> int:
+        return self._next_ptr
+
+    def reserve(self, nbytes: int, *, alignment: int = 512) -> int:
+        """Reserve physical bytes and return the aligned window address."""
+        if nbytes <= 0 or alignment <= 0:
+            raise ValueError("Allocation size and alignment must be positive")
+        ptr = round_up(self._next_ptr, alignment)
+        if ptr + nbytes > self._limit:
+            raise RuntimeError(
+                f"URMA HBM window has {max(0, self._limit - ptr)} bytes available "
+                f"after alignment, requested {nbytes} bytes"
+            )
+        self._next_ptr = ptr + nbytes
+        return ptr
+
+    def allocate(
+        self,
+        *,
+        nbytes: int,
+        dtype: torch.dtype,
+        shape: tuple[int, ...],
+        stride: tuple[int, ...],
+        npu_format: int,
+        alignment: int = 512,
+    ) -> torch.Tensor:
+        """Reserve bytes and expose them as a tensor with the requested metadata."""
+        ptr = self.reserve(nbytes, alignment=alignment)
+        return self.wrap(ptr, nbytes, dtype, shape, stride, npu_format)
+
+    def wrap(
+        self,
+        ptr: int,
+        nbytes: int,
+        dtype: torch.dtype,
+        shape: tuple[int, ...],
+        stride: tuple[int, ...],
+        npu_format: int,
+    ) -> torch.Tensor:
+        """Expose already reserved window bytes as a tensor with new metadata."""
+        if nbytes <= 0:
+            raise ValueError("Allocation size must be positive")
+        if not (self._base <= ptr and ptr + nbytes <= self._next_ptr):
+            raise ValueError("Requested tensor exceeds the reserved URMA HBM range")
+        return self._wrap(ptr, nbytes, dtype, shape, stride, npu_format)
+
     def empty_like(
         self, template: torch.Tensor, *, alignment: int = 512
     ) -> torch.Tensor:

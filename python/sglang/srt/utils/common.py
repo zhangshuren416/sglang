@@ -5061,6 +5061,12 @@ def temp_attr_context(obj, attr, value):
         setattr(obj, attr, original_value)
 
 
+def check_return_code(return_code: int, operation: str) -> None:
+    """Raise on failure for APIs that return zero on success."""
+    if return_code != 0:
+        raise RuntimeError(f"{operation} failed with return code {return_code}")
+
+
 def raise_error_or_warn(obj, strict, counter_name, message, log_interval=1000):
     if strict:
         raise ValueError(message)

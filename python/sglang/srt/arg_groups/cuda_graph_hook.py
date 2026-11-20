@@ -32,11 +32,9 @@ logger = logging.getLogger(__name__)
 def parse_cuda_graph_config(server_args: Any):
     """Resolve cuda_graph_config from explicit JSON, per-phase
     convenience flags, legacy global flags, and defaults.
-    Precedence (highest first): explicit JSON > convenience > legacy > defaults.
-    Also populates server_args._cuda_graph_config_locked — the set of
-    (phase, key) tuples that came from non-default sources; the
-    auto-disable cascade respects this lock (an explicitly supplied prefill
-    backend skips the cascade, whichever value it is).
+    User input precedence: explicit JSON > convenience > legacy > defaults.
+    MoE weight sharing forces the prefill backend to disabled. The lock set
+    records (phase, key) overrides that later default handlers must preserve.
     """
     cfg = resolving_view(server_args)
     raw_input = cfg.cuda_graph_config
@@ -86,12 +84,18 @@ def parse_cuda_graph_config(server_args: Any):
             cfg.cuda_graph_prefill_max_context,
         )
 
-    # ---- Explicit JSON config (highest precedence) ----
+    # ---- Explicit JSON config ----
     for phase, phase_config in explicit_input.items():
         if not isinstance(phase_config, dict):
             continue
         for key, value in phase_config.items():
             _set(phase, key, value)
+
+    if (
+        getattr(cfg, "moe_weight_share_size", 0) > 0
+        and cfg.disaggregation_mode == "prefill"
+    ):
+        _set(Phase.PREFILL, "backend", Backend.DISABLED)
 
     declare_resolution(
         server_args,

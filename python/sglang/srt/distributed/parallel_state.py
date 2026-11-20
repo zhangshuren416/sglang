@@ -61,6 +61,7 @@ from sglang.srt.runtime_context import (
     get_flags,
     get_global_dwdp_manager,
     get_parallel,
+    is_weight_sharing_enabled,
     set_global_dwdp_manager,
 )
 from sglang.srt.utils import (
@@ -3265,6 +3266,13 @@ def get_moe_tensor_parallel_rank():
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
+    if is_weight_sharing_enabled():
+        from sglang.srt.hardware_backend.npu.moe.weight_sharing.manager import (
+            cleanup_weight_sharing,
+        )
+
+        cleanup_weight_sharing()
+
     from sglang.srt.distributed.bootstrap import reset_parallel_initialised
 
     reset_parallel_initialised()

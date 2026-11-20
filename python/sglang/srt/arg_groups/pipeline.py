@@ -293,6 +293,12 @@ def run_resolution_pipeline(server_args: Any) -> None:
 
     run_hook(handle_moe_kernel_config, server_args)
     run_hook(handle_a2a_moe, server_args)
+
+    from sglang.srt.arg_groups.moe_weight_share_hook import (
+        handle_moe_weight_sharing,
+    )
+
+    run_hook(handle_moe_weight_sharing, server_args)
     run_hook(handle_shared_experts_tp, server_args)
     run_hook(handle_eplb_and_dispatch, server_args)
     run_hook(handle_expert_distribution_metrics, server_args)

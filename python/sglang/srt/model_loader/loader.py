@@ -55,6 +55,7 @@ from sglang.srt.runtime_context import (
     get_model,
     get_parallel,
     get_server_args,
+    is_weight_sharing_enabled,
 )
 from sglang.srt.utils import get_available_gpu_memory
 
@@ -148,6 +149,13 @@ if TYPE_CHECKING:
     from sglang.srt.layers.quantization.base_config import QuantizationConfig
 
 _is_npu = is_npu()
+if _is_npu:
+    from sglang.srt.hardware_backend.npu.moe.weight_sharing.manager import (
+        after_module_quantized,
+        finalize_weight_sharing,
+        prepare_weight_sharing,
+    )
+
 # ModelOpt: QUANT_CFG_CHOICES is imported from modelopt_utils.py
 # which contains the complete mapping of quantization config choices
 
@@ -1026,6 +1034,8 @@ class DefaultModelLoader(BaseModelLoader):
 
     @staticmethod
     def load_weights_and_postprocess(model, weights, target_device):
+        if is_weight_sharing_enabled():
+            prepare_weight_sharing()
         DefaultModelLoader.load_weights_only(model, weights, target_device)
         DefaultModelLoader.postprocess_weights(model, target_device)
 
@@ -1079,6 +1089,8 @@ class DefaultModelLoader(BaseModelLoader):
     def postprocess_weights(model, target_device):
         if QuantizedRLModelLoader.is_reload_scenario(model):
             return
+
+        weight_sharing = is_weight_sharing_enabled()
         for module, quant_method in _modules_with_quant_method(model):
             # When quant methods need to process weights after loading
             # (for repacking, quantizing, etc), they expect parameters
@@ -1087,6 +1099,10 @@ class DefaultModelLoader(BaseModelLoader):
             # parameters onto device for processing and back off after.
             with device_loading_context(module, target_device):
                 quant_method.process_weights_after_loading(module)
+            if weight_sharing:
+                after_module_quantized(module)
+        if weight_sharing:
+            finalize_weight_sharing()
 
     @staticmethod
     def restore_weights_before_loading(model, target_device):

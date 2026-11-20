@@ -69,6 +69,10 @@ from sglang.srt.elastic_ep.topology import (
     physical_ep_size_to_dp_size,
 )
 from sglang.srt.environ import envs
+from sglang.srt.hardware_backend.npu.moe.weight_sharing.config import (
+    MEMFABRIC_CONTROL_TIMEOUT_SECS,
+    PREFETCH_THREAD_JOIN_TIMEOUT_SECS,
+)
 from sglang.srt.layers.joint_schema_head import (
     max_joint_prompt_tokens,
     parse_decision_layout,
@@ -165,6 +169,7 @@ from sglang.srt.runtime_context import (
     get_schedule,
     get_serving,
     get_spec,
+    is_weight_sharing_enabled,
 )
 from sglang.srt.sampling.custom_logit_processor import supports_sampling_mask
 from sglang.srt.sampling.sampling_params import SamplingParams
@@ -3542,10 +3547,15 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         # Stop the watchdog: child exits are expected during shutdown, not crashes.
         if self._subprocess_watchdog is not None:
             self._subprocess_watchdog.stop()
+        scheduler_exit_timeout = _SCHEDULER_EXIT_TIMEOUT_SECS
+        if is_weight_sharing_enabled():
+            scheduler_exit_timeout += (
+                PREFETCH_THREAD_JOIN_TIMEOUT_SECS + MEMFABRIC_CONTROL_TIMEOUT_SECS
+            )
         # Ask schedulers to release resources in userspace and exit (see
         # ShutdownReq), then wait for them before hard-killing the rest.
         self._dispatch_to_scheduler(ShutdownReq())
-        deadline = time.monotonic() + _SCHEDULER_EXIT_TIMEOUT_SECS
+        deadline = time.monotonic() + scheduler_exit_timeout
         while time.monotonic() < deadline and collect_scheduler_processes():
             time.sleep(0.1)
         stragglers = [proc.pid for proc in collect_scheduler_processes()]
@@ -3553,7 +3563,7 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             # SIGKILL here lands mid-release,
             # which is how GPU memory survives a shutdown. Name the pids.
             logger.warning(
-                f"Schedulers still alive {_SCHEDULER_EXIT_TIMEOUT_SECS}s after "
+                f"Schedulers still alive {scheduler_exit_timeout}s after "
                 f"ShutdownReq, killing them before they released: {stragglers}"
             )
         kill_process_tree(os.getpid(), include_parent=False, wait_timeout=60)

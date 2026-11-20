@@ -207,6 +207,7 @@ from sglang.srt.runtime_context import (
     get_parallel,
     get_schedule,
     get_spec,
+    is_weight_sharing_enabled,
     max_speculative_num_draft_tokens,
     remote_instance_transfer_engine_enabled,
     set_global_dwdp_manager,
@@ -1857,6 +1858,12 @@ class ModelRunner:
                 forward_batch,
             ) as recorder_outputs,
         ):
+            if not self.is_draft_worker and is_weight_sharing_enabled():
+                from sglang.srt.hardware_backend.npu.moe.weight_sharing.manager import (
+                    on_model_forward_start,
+                )
+
+                on_model_forward_start()
             output = self._forward_raw(
                 forward_batch,
                 pp_proxy_tensors,

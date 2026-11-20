@@ -873,6 +873,25 @@ class ExecMoe(msgspec.Struct):
         "mxf4xmxf4 MMA type. Use with "
         "--moe-a2a-backend megamoe.",
     ] = False
+    moe_weight_share_size: A[
+        int,
+        "Number of prefill instances that share MoE expert weights. "
+        "0 disables weight sharing.",
+    ] = 0
+    moe_weight_share_rank: A[
+        int,
+        "This prefill instance's index in the MoE weight sharing group.",
+    ] = 0
+    moe_weight_share_store_url: A[
+        Optional[str],
+        "MemFabric store URL used only by the MoE weight sharing group. "
+        "Must differ from ASCEND_MF_STORE_URL.",
+    ] = None
+    moe_weight_share_bytes: A[
+        Optional[int],
+        "Override the automatically sized MoE weight sharing window. "
+        "The value must not be smaller than the computed requirement.",
+    ] = None
     deepep_v2_mode: A[
         Literal["direct", "hybrid"],
         "DeepEP v2 ElasticBuffer communication topology, fixed at server init: "

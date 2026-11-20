@@ -44,6 +44,7 @@ from sglang.srt.runtime_context import (
     get_schedule,
     get_serving,
     get_spec,
+    is_weight_sharing_enabled,
     publish,
     spawn_world_rank,
 )
@@ -6391,8 +6392,16 @@ def run_scheduler_process(
             # and the synchronize() in destroy() could itself hang.
             if scheduler.gracefully_exit:
                 scheduler.release_host_resources()
-                # Last: anything above may still need a working communicator.
-                abort_distributed_environment()
+                try:
+                    if is_weight_sharing_enabled():
+                        from sglang.srt.hardware_backend.npu.moe.weight_sharing.manager import (
+                            cleanup_weight_sharing,
+                        )
+
+                        cleanup_weight_sharing()
+                finally:
+                    # Last: anything above may still need a working communicator.
+                    abort_distributed_environment()
 
 
 def _make_abort_req(

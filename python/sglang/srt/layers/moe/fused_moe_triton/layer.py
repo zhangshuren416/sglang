@@ -100,6 +100,11 @@ _is_cpu = is_cpu()
 _is_npu = is_npu()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 
+if _is_npu:
+    from sglang.srt.hardware_backend.npu.moe.weight_sharing.manager import (
+        maybe_register_layer,
+    )
+
 # Log the deferred-finalize config at most once per process (rank). Different MoE
 # layers can resolve to different quant methods, so print_info_once (keyed on the
 # full message) would otherwise fire once per distinct quant method.
@@ -558,9 +563,19 @@ class FusedMoE(torch.nn.Module):
         )
         self.supports_deferred_finalize = False
 
+        self._shared_weight_layer = maybe_register_layer(self) if _is_npu else None
+        if self._shared_weight_layer is not None and use_weight_loader_fused:
+            raise ValueError(
+                "MoE weight sharing requires use_weight_loader_fused=False"
+            )
+
         self.quant_method.create_weights(
             layer=self,
-            num_experts=self.num_local_experts,
+            num_experts=(
+                self._shared_weight_layer.owned_count
+                if self._shared_weight_layer is not None
+                else self.num_local_experts
+            ),
             hidden_size=hidden_size,
             intermediate_size_per_partition=self.intermediate_size_per_partition,
             params_dtype=params_dtype,
@@ -1322,6 +1337,15 @@ class FusedMoE(torch.nn.Module):
         shard_id: str,
         expert_id: int,
     ) -> None:
+        if (
+            self._shared_weight_layer is not None
+            and expert_id is not None
+            and not getattr(param, "_sglang_require_global_experts", False)
+        ):
+            expert_id = self._shared_weight_layer.local_to_shard(expert_id)
+            if expert_id < 0:
+                return
+
         # Special case for GGUF weights
         if self._load_gguf_weight(param, loaded_weight, shard_id, expert_id):
             return
@@ -1715,6 +1739,9 @@ class FusedMoE(torch.nn.Module):
         origin_hidden_states_dim = hidden_states.shape[-1]
         assert self.quant_method is not None
 
+        if self._shared_weight_layer is not None:
+            self._shared_weight_layer.before_forward()
+
         if self._dwdp_bound:
             dwdp_mgr = get_global_dwdp_manager()
             dwdp_mgr.wait_prefetch(self.layer_id)
@@ -1726,6 +1753,9 @@ class FusedMoE(torch.nn.Module):
         combine_input = self.run_moe_core(
             dispatch_output=dispatch_output,
         )
+
+        if self._shared_weight_layer is not None:
+            self._shared_weight_layer.after_forward()
 
         if self._dwdp_bound:
             dwdp_mgr.record_compute_and_prefetch_next(self.layer_id)
